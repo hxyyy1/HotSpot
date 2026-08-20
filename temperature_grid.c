@@ -1294,7 +1294,7 @@ void dump_steady_temp_grid (grid_model_t *model, char *file)
     fclose(fp);
 }
 
-void dump_transient_temp_grid(grid_model_t *model, int trace_num, double sampling_intvl, char *filename) {
+void dump_transient_temp_grid(grid_model_t *model, double elapsed_time, char *filename) {
   FILE *grid_transient_fp = fopen(filename, "a");
 
   if(!grid_transient_fp) {
@@ -1305,7 +1305,7 @@ void dump_transient_temp_grid(grid_model_t *model, int trace_num, double samplin
     fatal(err_message);
   }
 
-  fprintf(grid_transient_fp, "t = %lf\n", trace_num * sampling_intvl);
+  fprintf(grid_transient_fp, "t = %.12g\n", elapsed_time);
   for(int l = 0; l < model->n_layers; l++) {
     fprintf(grid_transient_fp, "Layer %d:\n", l);
     for(int i = 0; i < model->rows; i++) {

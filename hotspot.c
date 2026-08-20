@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
+#include <strings.h>
 #include <ctype.h>
 #include <math.h>
 
@@ -23,6 +24,7 @@
 
 // My stuff
 #define PRINT_GRID_TRANSIENT 1
+#define MAX_TRACE_VALUES (MAX_UNITS + 1)
 
 /* HotSpot thermal model is offered in two flavours - the block
  * version and the grid version. The block model models temperature
@@ -77,6 +79,7 @@ void usage(int argc, char **argv)
   fprintf(stdout, "            \tlayer configuration file (e.g. layer.lcf) when the\n");
   fprintf(stdout, "            \tlatter is specified\n");
   fprintf(stdout, "   -p <file>\tpower trace input file (e.g. gcc.ptrace)\n");
+  fprintf(stdout, "            \tan optional leading 'dt' column specifies each row's duration in seconds\n");
   fprintf(stdout, "  [-o <file>]\ttransient temperature trace output file - if not provided, only\n");
   fprintf(stdout, "            \tsteady state temperatures are output to stdout\n");
   fprintf(stdout, "  [-c <file>]\tinput configuration parameters from file (e.g. hotspot.config)\n");
@@ -199,14 +202,14 @@ int read_names(FILE *fp, char **names)
     fatal("line too long\n");
 
   /* chop the names from the line read	*/
-  for(i=0,src=line; *src && i < MAX_UNITS; i++) {
+  for(i=0,src=line; *src && i < MAX_TRACE_VALUES; i++) {
       if(!sscanf(src, "%s", names[i]))
         fatal("invalid format of names\n");
       src += strlen(names[i]);
       while (isspace((int)*src))
         src++;
   }
-  if(*src && i == MAX_UNITS)
+  if(*src && i == MAX_TRACE_VALUES)
     fatal("no. of units exceeded limit\n");
 
   return i;
@@ -233,14 +236,14 @@ int read_vals(FILE *fp, double *vals)
     fatal("line too long\n");
 
   /* chop the power values from the line read	*/
-  for(i=0,src=line; *src && i < MAX_UNITS; i++) {
+  for(i=0,src=line; *src && i < MAX_TRACE_VALUES; i++) {
       if(!sscanf(src, "%s", temp) || !sscanf(src, "%lf", &vals[i]))
         fatal("invalid format of values\n");
       src += strlen(temp);
       while (isspace((int)*src))
         src++;
   }
-  if(*src && i == MAX_UNITS)
+  if(*src && i == MAX_TRACE_VALUES)
     fatal("no. of entries exceeded limit\n");
 
   return i;
@@ -348,7 +351,8 @@ void print_simulation_summary(thermal_config_t thermal_config, RC_model_t *model
  * a trace file("gcc.ttrace"). also outputs steady state temperature values
  * (including those of the internal nodes of the model) onto stdout. the
  * trace files are 2-d matrices with each column representing a functional
- * functional block and each row representing a time unit(sampling_intvl).
+ * functional block and each row representing either one sampling_intvl or,
+ * when the first header field is "dt", the duration specified in that row.
  * columns are tab-separated and each row is a separate line. the first
  * line contains the names of the functional blocks. the order in which
  * the columns are specified doesn't have to match that of the floorplan
@@ -357,7 +361,8 @@ void print_simulation_summary(thermal_config_t thermal_config, RC_model_t *model
 int main(int argc, char **argv)
 {
   int i, j, idx, base = 0, count = 0, n = 0;
-  int num, size, lines = 0, do_transient = TRUE;
+  int num, name_count, size, lines = 0, do_transient = TRUE;
+  int has_variable_dt = FALSE, trace_offset = 0;
   char **names;
   double *vals;
   /* trace file pointers	*/
@@ -369,6 +374,7 @@ int main(int argc, char **argv)
   /* instantaneous temperature and power values	*/
   double *temp = NULL, *power;
   double total_power = 0.0;
+  double row_dt, elapsed_time = 0.0, total_time = 0.0;
 
   /* steady state temperature and power values	*/
   double *overall_power, *steady_temp;
@@ -556,30 +562,39 @@ int main(int argc, char **argv)
     fatal("unable to open temperature trace file for output\n");
 
   /* names of functional units	*/
-  names = alloc_names(MAX_UNITS, STR_SIZE);
-  if(read_names(pin, names) != n)
+  names = alloc_names(MAX_TRACE_VALUES, STR_SIZE);
+  name_count = read_names(pin, names);
+  if (name_count == n + 1 && !strcasecmp(names[0], "dt")) {
+    has_variable_dt = TRUE;
+    trace_offset = 1;
+  }
+  if(name_count != n + trace_offset)
     fatal("no. of units in floorplan and trace file differ\n");
 
   /* header line of temperature trace	*/
   if (do_transient)
-    write_names(tout, names, n);
+    write_names(tout, &names[trace_offset], n);
 
   /* read the instantaneous power trace	*/
-  vals = dvector(MAX_UNITS);
+  vals = dvector(MAX_TRACE_VALUES);
   while ((num=read_vals(pin, vals)) != 0) {
-      if(num != n)
+      if(num != n + trace_offset)
         fatal("invalid trace file format\n");
+
+      row_dt = has_variable_dt ? vals[0] : model->config->sampling_intvl;
+      if(!isfinite(row_dt) || row_dt <= 0)
+        fatal("time-step duration 'dt' must be a finite value greater than zero\n");
 
       /* permute the power numbers according to the floorplan order	*/
       if (model->type == BLOCK_MODEL)
         for(i=0; i < n; i++)
-          power[get_blk_index(flp, names[i])] = vals[i];
+          power[get_blk_index(flp, names[trace_offset+i])] = vals[trace_offset+i];
       else
         for(i=0, base=0, count=0; i < model->grid->n_layers; i++) {
             if(model->grid->layers[i].has_power) {
                 for(j=0; j < model->grid->layers[i].flp->n_units; j++) {
-                    idx = get_blk_index(model->grid->layers[i].flp, names[count+j]);
-                    power[base+idx] = vals[count+j];
+                    idx = get_blk_index(model->grid->layers[i].flp, names[trace_offset+count+j]);
+                    power[base+idx] = vals[trace_offset+count+j];
                 }
                 count += model->grid->layers[i].flp->n_units;
             }
@@ -595,7 +610,7 @@ int main(int argc, char **argv)
               populate_R_model(model, flp);
           }
 
-          printf("Computing temperatures for t = %e...\n", lines*model->config->sampling_intvl);
+          printf("Computing temperatures for interval ending at t = %e...\n", elapsed_time + row_dt);
 
           /* for the grid model, only the first call to compute_temp
            * passes a non-null 'temp' array. if 'temp' is  NULL,
@@ -604,46 +619,51 @@ int main(int argc, char **argv)
            * across multiple calls of compute_temp
            */
           if (model->type == BLOCK_MODEL || lines == 0)
-            compute_temp(model, power, temp, model->config->sampling_intvl);
+            compute_temp(model, power, temp, row_dt);
           else
-            compute_temp(model, power, NULL, model->config->sampling_intvl);
+            compute_temp(model, power, NULL, row_dt);
+
+          elapsed_time += row_dt;
 
 
         // Print grid transient temperatures to file if one has been specified
         if(model->type == GRID_MODEL && strcmp(model->config->grid_transient_file, NULLFILE)) {
-          dump_transient_temp_grid(model->grid, lines, model->config->sampling_intvl, model->config->grid_transient_file);
+          dump_transient_temp_grid(model->grid, elapsed_time, model->config->grid_transient_file);
         }
           /* permute back to the trace file order	*/
           if (model->type == BLOCK_MODEL)
             for(i=0; i < n; i++)
-              vals[i] = temp[get_blk_index(flp, names[i])];
+              vals[trace_offset+i] = temp[get_blk_index(flp, names[trace_offset+i])];
           else
             for(i=0, base=0, count=0; i < model->grid->n_layers; i++) {
                 if(model->grid->layers[i].has_power) {
                     for(j=0; j < model->grid->layers[i].flp->n_units; j++) {
-                        idx = get_blk_index(model->grid->layers[i].flp, names[count+j]);
-                        vals[count+j] = temp[base+idx];
+                        idx = get_blk_index(model->grid->layers[i].flp, names[trace_offset+count+j]);
+                        vals[trace_offset+count+j] = temp[base+idx];
                     }
                     count += model->grid->layers[i].flp->n_units;
                 }
                 base += model->grid->layers[i].flp->n_units;
             }
           /* output instantaneous temperature trace	*/
-          write_vals(tout, vals, n);
+          write_vals(tout, &vals[trace_offset], n);
       }
 
       /* for computing average	*/
       if (model->type == BLOCK_MODEL)
         for(i=0; i < n; i++)
-          overall_power[i] += power[i];
+          overall_power[i] += power[i] * row_dt;
       else
         for(i=0, base=0; i < model->grid->n_layers; i++) {
             if(model->grid->layers[i].has_power)
               for(j=0; j < model->grid->layers[i].flp->n_units; j++)
-                overall_power[base+j] += power[base+j];
+                overall_power[base+j] += power[base+j] * row_dt;
             base += model->grid->layers[i].flp->n_units;
         }
 
+      if (!do_transient)
+        elapsed_time += row_dt;
+      total_time += row_dt;
       lines++;
   }
   if(!lines)
@@ -652,14 +672,14 @@ int main(int argc, char **argv)
   /* for computing average	*/
   if (model->type == BLOCK_MODEL)
     for(i=0; i < n; i++) {
-        overall_power[i] /= lines;
+        overall_power[i] /= total_time;
         total_power += overall_power[i];
     }
   else
     for(i=0, base=0; i < model->grid->n_layers; i++) {
         if(model->grid->layers[i].has_power)
           for(j=0; j < model->grid->layers[i].flp->n_units; j++) {
-              overall_power[base+j] /= lines;
+              overall_power[base+j] /= total_time;
               total_power += overall_power[base+j];
           }
         base += model->grid->layers[i].flp->n_units;
